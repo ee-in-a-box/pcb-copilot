@@ -1,0 +1,11 @@
+# MCP server framework
+mcp>=1.0.0
+
+# HTTP client for update check
+httpx>=0.25.0
+
+# Dev
+# pip install pytest pytest-ruff ruff
+
+# Build
+# pip install pyinstaller

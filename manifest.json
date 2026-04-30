@@ -1,0 +1,55 @@
+{
+  "manifest_version": "0.4",
+  "name": "pcb-copilot",
+  "display_name": "PCB Copilot",
+  "version": "0.1.0",
+  "description": "Schematic copilot for cross-functional teams. Reads an Altium Designer snapshot (.db file) exported by altium-copilot and gives firmware, mechanical, test, and reliability engineers full pin-level schematic access — no Altium license required.",
+  "author": {
+    "name": "Maisam Pyarali",
+    "url": "https://github.com/maisamp"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ee-in-a-box/pcb-copilot",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ee-in-a-box/pcb-copilot"
+  },
+  "tools": [
+    {
+      "name": "detect_project",
+      "description": "Check registry for a remembered .db file. If found and the file exists, auto-loads the project and returns metadata — no second call needed. Returns {loaded: false} when the user needs to provide a path. Always call this first at session start."
+    },
+    {
+      "name": "open_project",
+      "description": "Open a pcb-copilot .db snapshot file given its full path. Validates the schema version, loads all project data into memory, and saves the path for future sessions. Call when detect_project returns loaded=false, or to switch to a different board."
+    },
+    {
+      "name": "list_variants",
+      "description": "List all build variants and their DNP (Do Not Populate) component lists. Shows which variant is currently active. Always call after loading a project so the user can choose which variant to work in."
+    },
+    {
+      "name": "set_active_variant",
+      "description": "Set the active build variant by name. All subsequent tool calls filter components by this variant's DNP list — unpopulated components are marked dnp=true. Always call after the user selects a variant."
+    },
+    {
+      "name": "list_sheets",
+      "description": "Return all sheet names in the project. Call this when you need to know what sheets exist — for example when the user's question doesn't name a specific sheet, or when a get_sheet_context call returns sheet_not_found."
+    },
+    {
+      "name": "get_sheet_context",
+      "description": "Get all components on a schematic sheet with their pin-to-net connections and one-hop cross-sheet neighbors. The primary tool for questions about what is on a sheet, how a circuit works, signal flow, or what connects to what. Call this first for most schematic questions."
+    },
+    {
+      "name": "get_component",
+      "description": "Look up a specific component by reference designator, MPN, or description keyword. Returns MPN, value, description, sheet, all pins with names and net connections, and DNP status for the active variant. Use for targeted component lookups after get_sheet_context."
+    },
+    {
+      "name": "get_net",
+      "description": "Look up a net by name or keyword. Returns all pins on the net with component context for normal nets. For high-fanout nets (power/ground rails with >25 pins), returns a summary and prompts for a more specific query. Use for targeted signal or power rail lookups."
+    }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["win32", "darwin"]
+  }
+}

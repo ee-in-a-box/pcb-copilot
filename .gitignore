@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.db
+*.pyc
+.pytest_cache/
+
+# Build output
+dist/
+
+# PyInstaller build artifacts
+build/
+*.spec
+
+# Personal project notes
+docs/
+
+# Claude
+.claude/
