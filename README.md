@@ -17,22 +17,16 @@ Part of the [ee-in-a-box](https://github.com/ee-in-a-box) suite.
 
 ## What it does
 
-| A firmware engineer may ask... | What happens |
-|---|---|
-| *"Which GPIO is connected to the enable pin on U5?"* | Traces the pin to its net, finds the MCU pin on the other end |
-| *"What's on SPI bus 3?"* | Lists every component whose chip-select, MOSI, MISO, or SCK lands on those nets |
-| *"Are there pull-ups on the I2C lines, and what value?"* | Finds the resistors on the SDA/SCL nets with their values |
-
-| A mechanical engineer may ask... | What happens |
-|---|---|
-| *"What's the pinout of J4?"* | Returns every pin number, signal name, and what it connects to |
-| *"Which connectors carry power?"* | Finds connectors with pins on power nets |
-
-| A test engineer may ask... | What happens |
-|---|---|
-| *"How do I get to the 5V rail for a probe?"* | Lists every pin on that net — connectors, test points, component legs |
-| *"Which part is most likely to fail first under a 40V surge on the input?"* | Pulls every component on that net with ratings from their datasheets |
-| *"What's not populated in the production variant?"* | Returns the full DNP list for the active build variant |
+| Who | They may ask... | What happens |
+|---|---|---|
+| **Firmware** | *"Which GPIO is connected to the enable pin on U5?"* | Traces the pin to its net, finds the MCU pin on the other end |
+| | *"What's on SPI bus 3?"* | Lists every component whose chip-select, MOSI, MISO, or SCK lands on those nets |
+| | *"Are there pull-ups on the I2C lines, and what value?"* | Finds the resistors on the SDA/SCL nets with their values |
+| **Mechanical** | *"What's the pinout of J4?"* | Returns every pin number, signal name, and what it connects to |
+| | *"Which connectors carry power?"* | Finds connectors with pins on power nets |
+| **Test** | *"How do I get to the 5V rail for a probe?"* | Lists every pin on that net — connectors, test points, component legs |
+| | *"Which part is most likely to fail first under a 40V surge on the input?"* | Pulls every component on that net with ratings from their datasheets |
+| | *"What's not populated in the production variant?"* | Returns the full DNP list for the active build variant |
 
 ![Usage](assets/Usage.gif)
 
