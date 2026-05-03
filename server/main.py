@@ -225,6 +225,10 @@ def detect_project() -> str:
     update_available = state.get("update_available")
     if update_available and _is_newer(update_available, current):
         result["update_available"] = update_available
+        if sys.platform == "win32":
+            result["update_command"] = "irm https://raw.githubusercontent.com/ee-in-a-box/pcb-copilot/main/install.ps1 | iex"
+        else:
+            result["update_command"] = "curl -fsSL https://raw.githubusercontent.com/ee-in-a-box/pcb-copilot/main/install.sh | bash"
     return json.dumps(result, indent=2)
 
 
