@@ -1,6 +1,6 @@
 # PCB Copilot
 
-[![Release](https://github.com/ee-in-a-box/pcb-copilot/actions/workflows/release.yml/badge.svg)](https://github.com/ee-in-a-box/pcb-copilot/actions/workflows/release.yml)
+[![CI](https://github.com/ee-in-a-box/pcb-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/ee-in-a-box/pcb-copilot/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/github/downloads/ee-in-a-box/pcb-copilot/total?color=brightgreen)](https://github.com/ee-in-a-box/pcb-copilot/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: Windows | macOS](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey.svg)]()
