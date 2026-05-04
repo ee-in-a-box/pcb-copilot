@@ -11,12 +11,20 @@ REGISTRY_PATH = Path.home() / ".ee-in-a-box" / "pcb-copilot-registry.json"
 
 def read_registry() -> dict:
     try:
-        return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        data = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {"projects": []}
     except Exception as e:
         logger.error(f"pcb-copilot: failed to read registry: {e}")
         return {"projects": []}
+
+    projects = data.get("projects", [])
+    live = [p for p in projects if Path(p["path"]).exists()]
+    if len(live) != len(projects):
+        data["projects"] = live
+        write_registry(data)
+
+    return data
 
 
 def write_registry(registry: dict) -> None:
