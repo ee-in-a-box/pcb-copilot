@@ -33,62 +33,96 @@ def _make_db(path: str, schema_version: int = 1) -> None:
     conn.close()
 
 
-# ---- detect_project tests ----
+# ---- load_project tests ----
 
-def test_detect_project_no_registry_returns_not_loaded():
+def test_load_project_no_registry_returns_not_loaded():
     import main
     with patch("main.read_registry", return_value={"projects": []}):
-        result = json.loads(main.detect_project())
+        result = json.loads(main.load_project())
     assert result["loaded"] is False
+    assert "server_version" in result
 
 
-def test_detect_project_file_missing_warns(tmp_path):
-    import main
-    registry = {"projects": [{"path": str(tmp_path / "missing.db"), "last_used": "2026-01-01T00:00:00+00:00"}]}
-    with patch("main.read_registry", return_value=registry):
-        result = json.loads(main.detect_project())
-    assert result["loaded"] is False
-    assert "warning" in result
-
-
-def test_detect_project_loads_existing_file(tmp_path):
+def test_load_project_one_remembered_project_autoloads(tmp_path):
     import main
     db = str(tmp_path / "test.db")
     _make_db(db)
     registry = {"projects": [{"path": db, "last_used": "2026-01-01T00:00:00+00:00"}]}
     with patch("main.read_registry", return_value=registry):
-        result = json.loads(main.detect_project())
+        result = json.loads(main.load_project())
     assert result["loaded"] is True
     assert result["project"]["name"] == "TestBoard"
+    assert "server_version" in result
 
 
-# ---- open_project tests ----
-
-def test_open_project_file_not_found(tmp_path):
+def test_load_project_multiple_remembered_projects_returns_list(tmp_path):
     import main
-    result = json.loads(main.open_project(str(tmp_path / "missing.db")))
+    db1 = str(tmp_path / "a.db")
+    db2 = str(tmp_path / "b.db")
+    _make_db(db1)
+    _make_db(db2)
+    registry = {
+        "projects": [
+            {"path": db1, "last_used": "2026-01-01T00:00:00+00:00"},
+            {"path": db2, "last_used": "2026-01-02T00:00:00+00:00"},
+        ]
+    }
+    with patch("main.read_registry", return_value=registry):
+        result = json.loads(main.load_project())
+    assert result["loaded"] is False
+    assert "projects" in result
+    assert len(result["projects"]) == 2
+    # Most recently used should be first
+    assert result["projects"][0]["path"] == db2
+
+
+def test_load_project_file_missing_warns(tmp_path):
+    import main
+    registry = {"projects": [{"path": str(tmp_path / "missing.db"), "last_used": "2026-01-01T00:00:00+00:00"}]}
+    with patch("main.read_registry", return_value=registry):
+        result = json.loads(main.load_project())
+    assert result["loaded"] is False
+    assert "warning" in result
+
+
+def test_load_project_explicit_path_file_not_found(tmp_path):
+    import main
+    result = json.loads(main.load_project(str(tmp_path / "missing.db")))
+    assert result["loaded"] is False
     assert result["error"] == "file_not_found"
     assert "missing.db" in result["message"]
 
 
-def test_open_project_schema_too_new(tmp_path):
+def test_load_project_explicit_path_schema_too_new(tmp_path):
     import main
     db = str(tmp_path / "test.db")
     _make_db(db, schema_version=99)
-    result = json.loads(main.open_project(db))
+    result = json.loads(main.load_project(db))
+    assert result["loaded"] is False
     assert result["error"] == "schema_too_new"
     assert "altium-copilot" in result["message"]
 
 
-def test_open_project_success(tmp_path):
+def test_load_project_explicit_path_success(tmp_path):
     import main
     db = str(tmp_path / "test.db")
     _make_db(db)
     with patch("main.upsert_registry_entry"):
-        result = main.open_project(db)
-    assert "Snapshot from" in result
-    assert "TestBoard" in result
-    assert "2026-04-29" in result
+        result = json.loads(main.load_project(db))
+    assert result["loaded"] is True
+    assert result["project"]["name"] == "TestBoard"
+    assert "server_version" in result
+
+
+def test_load_project_registry_pruned_to_one_autoloads(tmp_path):
+    """After dead paths are pruned, a single survivor should auto-load."""
+    import main
+    db = str(tmp_path / "alive.db")
+    _make_db(db)
+    registry = {"projects": [{"path": db, "last_used": "2026-01-01T00:00:00+00:00"}]}
+    with patch("main.read_registry", return_value=registry):
+        result = json.loads(main.load_project())
+    assert result["loaded"] is True
 
 
 # ---- list_variants / set_active_variant tests ----

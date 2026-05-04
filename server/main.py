@@ -1,6 +1,7 @@
 # server/main.py
 import json
 import logging
+import os
 import sys
 import threading
 from datetime import datetime, timezone
@@ -43,7 +44,9 @@ def _read_version() -> str:
         return "0.0.0"
 
 
-STATE_PATH = Path.home() / ".ee-in-a-box" / "pcb-copilot-state.json"
+STATE_PATH = Path(
+    os.environ.get("USERPROFILE") or str(Path.home())
+) / ".ee-in-a-box" / "pcb-copilot-state.json"
 
 _GITHUB_RELEASES_URL = (
     "https://api.github.com/repos/ee-in-a-box/pcb-copilot/releases/latest"
@@ -85,21 +88,24 @@ exported from Altium Designer.
 
 ## Session Start
 
-Run these steps in order at the start of every session:
+IMPORTANT: Before responding to the user's first message — regardless of what
+they ask — you MUST run all three steps below in order. Do not skip, defer, or
+respond to the user until all three are complete.
 
-1. detect_project — check registry and auto-load if a remembered DB is found.
+1. load_project — no arguments needed at session start. Auto-loads if one project
+   is remembered; returns a list to choose from if multiple are remembered; returns
+   loaded=false if none — in which case ask the user for the .db file path and call
+   load_project(db_path=<path>). Never use shell commands or file system tools to
+   search for the .db file — only load_project with a path the user provides.
 2. list_variants — always ask the user which variant to work in, then call
    set_active_variant. Never auto-select even if only one variant exists.
 3. list_sheets — read all sheet names, then synthesize a summary for the user:
    project name, sheet count, variant count, snapshot age, and your read of
    what the board does based on component descriptions and sheet names.
 
-If detect_project returns loaded=false, ask the user for the .db file path,
-then call open_project.
-
 ## Switching Projects
 
-Call open_project with the new path, then repeat the session-start steps.
+Call load_project(db_path=<new path>), then repeat the session-start steps.
 
 ## General Rules
 
@@ -143,6 +149,12 @@ to provide the datasheet or the value directly.
   ICs with their temp rating"), state a brief plan and loop tool calls until
   complete.
 
+## Updates
+
+If load_project returns update_available, tell the user immediately:
+"A new version of pcb-copilot is available (vX.X.X). Run this to update: <update_command>"
+Do this before continuing with any other response.
+
 ## Error Recovery
 
 - Component not found → use get_component with a partial name or description
@@ -167,9 +179,14 @@ def _load(db_path: str) -> None:
     project_meta, sheets, variants, netlist = hydrate(db_path)
     schema_version = project_meta["schema_version"]
     if schema_version > SUPPORTED_SCHEMA_VERSION:
+        if sys.platform == "win32":
+            update_cmd = "irm https://raw.githubusercontent.com/ee-in-a-box/pcb-copilot/main/install.ps1 | iex"
+        else:
+            update_cmd = "curl -fsSL https://raw.githubusercontent.com/ee-in-a-box/pcb-copilot/main/install.sh | bash"
         raise SchemaTooNewError(
             f"This DB was exported with a newer altium-copilot. Update pcb-copilot "
-            f"to open it. (DB schema_version={schema_version}, "
+            f"to open it: {update_cmd} "
+            f"(DB schema_version={schema_version}, "
             f"supported={SUPPORTED_SCHEMA_VERSION}, "
             f"exported_by={project_meta['exported_by']})"
         )
@@ -188,77 +205,100 @@ def _load(db_path: str) -> None:
     _netlist = netlist
 
 
-# ---------- detect_project ----------
+# ---------- load_project ----------
 
-@mcp.tool(title="Detect Project", annotations=ToolAnnotations(readOnlyHint=True))
-def detect_project() -> str:
-    """Check registry for a remembered .db file. If found and file exists, auto-loads
-    the project — no second call needed. Returns {loaded: true, project: {...}} on
-    success or {loaded: false} when the user needs to provide a path."""
+@mcp.tool(title="Load Project", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def load_project(db_path: str | None = None) -> str:
+    """Load a pcb-copilot .db snapshot. With no argument, auto-loads the single
+    remembered project from the registry, or returns a list to choose from when
+    multiple are remembered. Pass db_path to load a specific file or to switch
+    projects. Always call at session start."""
+
+    def _update_notice(result: dict) -> dict:
+        state = _read_state()
+        current = _read_version()
+        update_available = state.get("update_available")
+        if update_available and _is_newer(update_available, current):
+            result["update_available"] = update_available
+            if sys.platform == "win32":
+                result["update_command"] = (
+                    "irm https://raw.githubusercontent.com/ee-in-a-box/pcb-copilot"
+                    "/main/install.ps1 | iex"
+                )
+            else:
+                result["update_command"] = (
+                    "curl -fsSL https://raw.githubusercontent.com/ee-in-a-box/pcb-copilot"
+                    "/main/install.sh | bash"
+                )
+        return result
+
+    current = _read_version()
+
+    # --- Explicit path provided ---
+    if db_path is not None:
+        if not Path(db_path).exists():
+            return json.dumps({
+                "loaded": False,
+                "error": "file_not_found",
+                "message": f"File not found: {db_path}. Check the path and try again.",
+            })
+        try:
+            _load(db_path)
+        except SchemaTooNewError as e:
+            return json.dumps({"loaded": False, "error": "schema_too_new", "message": str(e)})
+        except SchemaTooOldError as e:
+            return json.dumps({"loaded": False, "error": "schema_too_old", "message": str(e)})
+        except Exception as e:
+            return json.dumps({"loaded": False, "error": "load_failed", "message": str(e)})
+        upsert_registry_entry(db_path)
+        return json.dumps(_update_notice({
+            "loaded": True,
+            "project": _project,
+            "server_version": current,
+        }), indent=2)
+
+    # --- No path: check registry ---
     registry = read_registry()
     projects = registry.get("projects", [])
+
     if not projects:
-        return json.dumps({"loaded": False, "server_version": _read_version()})
+        return json.dumps({"loaded": False, "server_version": current})
 
-    latest = max(projects, key=lambda p: p.get("last_used", ""))
-    db_path = latest["path"]
+    if len(projects) == 1:
+        db_path = projects[0]["path"]
+        if not Path(db_path).exists():
+            return json.dumps({
+                "loaded": False,
+                "server_version": current,
+                "warning": (
+                    f"Previously used DB not found: {db_path}. "
+                    "Ask the user to provide the .db file path."
+                ),
+            })
+        try:
+            _load(db_path)
+        except SchemaTooNewError as e:
+            return json.dumps({"loaded": False, "error": "schema_too_new", "message": str(e),
+                               "server_version": current})
+        except SchemaTooOldError as e:
+            return json.dumps({"loaded": False, "error": "schema_too_old", "message": str(e),
+                               "server_version": current})
+        except Exception as e:
+            return json.dumps({"loaded": False, "error": "load_failed", "message": str(e),
+                               "server_version": current})
+        return json.dumps(_update_notice({
+            "loaded": True,
+            "project": _project,
+            "server_version": current,
+        }), indent=2)
 
-    if not Path(db_path).exists():
-        return json.dumps({
-            "loaded": False,
-            "warning": (
-                f"Previously used DB not found: {db_path}. "
-                "Ask the user to provide the .db file path."
-            ),
-            "server_version": _read_version(),
-        })
-
-    try:
-        _load(db_path)
-    except Exception as e:
-        return json.dumps({"loaded": False, "error": str(e),
-                           "server_version": _read_version()})
-
-    state = _read_state()
-    current = _read_version()
-    result: dict = {"loaded": True, "project": _project, "server_version": current}
-    update_available = state.get("update_available")
-    if update_available and _is_newer(update_available, current):
-        result["update_available"] = update_available
-    return json.dumps(result, indent=2)
-
-
-# ---------- open_project ----------
-
-@mcp.tool(title="Open Project", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-def open_project(db_path: str) -> str:
-    """Open a pcb-copilot .db snapshot file. Validates the schema version, loads all
-    project data into memory, and saves the path to the registry. Call at session start
-    when detect_project returns loaded=false, or to switch to a different board."""
-    if not Path(db_path).exists():
-        return json.dumps({
-            "error": "file_not_found",
-            "message": f"File not found: {db_path}. Check the path and try again.",
-        })
-
-    try:
-        _load(db_path)
-    except SchemaTooNewError as e:
-        return json.dumps({"error": "schema_too_new", "message": str(e)})
-    except SchemaTooOldError as e:
-        return json.dumps({"error": "schema_too_old", "message": str(e)})
-    except ValueError as e:
-        return json.dumps({"error": "open_failed", "message": str(e)})
-
-    upsert_registry_entry(db_path)
-
-    p = _project
-    exported_at = p["exported_at"][:16].replace("T", " ")
-    return (
-        f"Snapshot from {exported_at} UTC (exported by {p['exported_by']}).\n"
-        f"Project: {p['name']} — {p['sheet_count']} sheets, "
-        f"{p['component_count']} components, {len(_variants)} variants."
-    )
+    # --- Multiple projects: return sorted list for user to pick ---
+    sorted_projects = sorted(projects, key=lambda p: p.get("last_used", ""), reverse=True)
+    return json.dumps({
+        "loaded": False,
+        "server_version": current,
+        "projects": sorted_projects,
+    }, indent=2)
 
 
 # ---------- list_variants ----------
@@ -545,4 +585,14 @@ if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"pcb-copilot v{_read_version()}")  # noqa: T201
         sys.exit(0)
-    mcp.run()
+    try:
+        mcp.run()
+    finally:
+        # When the MCP stdio transport closes, Python's exit sequence tries to flush
+        # sys.stdout which is now a closed pipe → ValueError. Redirect to devnull so
+        # the process exits cleanly and Claude Desktop doesn't see a crashed server.
+        try:
+            sys.stdout = open(os.devnull, "w")  # noqa: WPS515
+            sys.stderr = open(os.devnull, "w")  # noqa: WPS515
+        except Exception:
+            pass

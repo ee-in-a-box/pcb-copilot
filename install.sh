@@ -3,12 +3,16 @@ set -euo pipefail
 
 REPO="ee-in-a-box/pcb-copilot"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-INSTALL_DIR="${HOME}/Library/Application Support/pcb-copilot"
+INSTALL_DIR="${HOME}/.local/bin"
 STATE_PATH="${HOME}/.ee-in-a-box/pcb-copilot-state.json"
 
 ok()   { echo "[OK]    $*"; }
 warn() { echo "[WARN]  $*"; }
 err()  { echo "[ERROR] $*" >&2; exit 1; }
+
+if ! command -v python3 &>/dev/null; then
+    err "python3 not found. Install Xcode Command Line Tools with: xcode-select --install"
+fi
 
 # Detect architecture
 ARCH=$(uname -m)

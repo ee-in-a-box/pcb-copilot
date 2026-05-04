@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [0.1.1] - 2026-05-03
+
+### Changed
+- `detect_project` and `open_project` consolidated into a single `load_project` tool — no args at session start, auto-loads one remembered project, presents a list when multiple are remembered, or accepts an explicit `db_path` to load or switch projects
+- `load_project` now returns a structured `project` dict on success (consistent with the old `detect_project` shape) rather than a summary string
+- `install.sh` now uses `~/.local/bin` and checks for `python3` upfront
+- Update notice now includes a platform-specific `update_command` field
+
+### Fixed
+- Registry test paths updated to use real temp files so dead-path pruning works correctly in tests
+
 ## [0.1.0] - 2026-05-03
 
 ### Added
