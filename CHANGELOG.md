@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [0.1.2] - 2026-05-03
+
+### Fixed
+- `install.sh`: auto-triggers Xcode installer when `python3` is missing, warns if Claude Desktop is still running after kill attempt, robust error handling on GitHub API version parse, adds `~/.bash_profile` to PATH updates, backs up `claude_desktop_config.json` before modifying it, safer Python heredoc for state file write
+- Registry now prunes stale entries (`.db` paths that no longer exist on disk) on every read
+- Release workflow: use `macos-15-intel` runner for the x64 macOS build
+
 ## [0.1.1] - 2026-05-03
 
 ### Changed
