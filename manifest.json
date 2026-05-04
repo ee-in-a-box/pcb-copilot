@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "pcb-copilot",
   "display_name": "PCB Copilot",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Schematic copilot for cross-functional teams. Reads an Altium Designer snapshot (.db file) exported by altium-copilot and gives firmware, mechanical, test, and reliability engineers full pin-level schematic access — no Altium license required.",
   "author": {
     "name": "Maisam Pyarali",
@@ -16,12 +16,8 @@
   },
   "tools": [
     {
-      "name": "detect_project",
-      "description": "Check registry for a remembered .db file. If found and the file exists, auto-loads the project and returns metadata — no second call needed. Returns {loaded: false} when the user needs to provide a path. Always call this first at session start."
-    },
-    {
-      "name": "open_project",
-      "description": "Open a pcb-copilot .db snapshot file given its full path. Validates the schema version, loads all project data into memory, and saves the path for future sessions. Call when detect_project returns loaded=false, or to switch to a different board."
+      "name": "load_project",
+      "description": "Load a pcb-copilot .db snapshot. With no argument, auto-loads the single remembered project, or returns a list to choose from when multiple are remembered. Pass db_path to load a specific file or switch projects. Always call at session start."
     },
     {
       "name": "list_variants",

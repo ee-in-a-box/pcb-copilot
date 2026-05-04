@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [0.1.3] - 2026-05-03
+
+### Fixed
+- `manifest.json`: replace stale `detect_project` + `open_project` tool entries with `load_project`
+
 ## [0.1.2] - 2026-05-03
 
 ### Fixed
