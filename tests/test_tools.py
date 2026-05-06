@@ -33,14 +33,90 @@ def _make_db(path: str, schema_version: int = 1) -> None:
     conn.close()
 
 
+# ---- _scan_for_db tests ----
+
+def test_scan_finds_db_in_search_dir(tmp_path):
+    import main
+    db = tmp_path / "BOARD-pcb-copilot.db"
+    db.touch()
+    results = main._scan_for_db(search_dirs=[tmp_path])
+    assert any(str(db) in path for path, _ in results)
+
+
+def test_scan_finds_db_nested(tmp_path):
+    import main
+    nested = tmp_path / "sub1" / "sub2"
+    nested.mkdir(parents=True)
+    db = nested / "BOARD-pcb-copilot.db"
+    db.touch()
+    results = main._scan_for_db(search_dirs=[tmp_path])
+    assert any(str(db) in path for path, _ in results)
+
+
+def test_scan_ignores_non_matching_files(tmp_path):
+    import main
+    (tmp_path / "something.db").touch()
+    results = main._scan_for_db(search_dirs=[tmp_path])
+    assert results == []
+
+
+def test_scan_returns_empty_for_missing_dir(tmp_path):
+    import main
+    missing = tmp_path / "nonexistent"
+    results = main._scan_for_db(search_dirs=[missing])
+    assert results == []
+
+
+def test_scan_sorts_by_most_recent(tmp_path):
+    import main, time
+    db1 = tmp_path / "OLD-pcb-copilot.db"
+    db1.touch()
+    time.sleep(0.01)
+    db2 = tmp_path / "NEW-pcb-copilot.db"
+    db2.touch()
+    results = main._scan_for_db(search_dirs=[tmp_path])
+    assert results[0][0] == str(db2)
+
+
+def test_format_age_today(tmp_path):
+    import main
+    p = tmp_path / "f.db"
+    p.touch()
+    assert main._format_age(p) == "today"
+
+
+# ---- _sync_registry_with_disk tests ----
+
+def test_sync_registry_with_disk_registers_all_and_returns_ages():
+    import main
+    db1 = "/tmp/A-pcb-copilot.db"
+    db2 = "/tmp/B-pcb-copilot.db"
+    with patch("main._scan_for_db", return_value=[(db1, "today"), (db2, "yesterday")]):
+        with patch("main.register_discovered") as mock_register:
+            result = main._sync_registry_with_disk()
+    assert mock_register.call_count == 2
+    mock_register.assert_any_call(db1)
+    mock_register.assert_any_call(db2)
+    assert result == {db1: "today", db2: "yesterday"}
+
+
+def test_sync_registry_with_disk_empty_scan_returns_empty_dict():
+    import main
+    with patch("main._scan_for_db", return_value=[]):
+        with patch("main.register_discovered") as mock_register:
+            result = main._sync_registry_with_disk()
+    mock_register.assert_not_called()
+    assert result == {}
+
+
 # ---- load_project tests ----
 
 def test_load_project_no_registry_returns_not_loaded():
     import main
-    with patch("main.read_registry", return_value={"projects": []}):
-        result = json.loads(main.load_project())
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value={"projects": []}):
+            result = json.loads(main.load_project())
     assert result["loaded"] is False
-    assert "server_version" in result
 
 
 def test_load_project_one_remembered_project_autoloads(tmp_path):
@@ -48,8 +124,9 @@ def test_load_project_one_remembered_project_autoloads(tmp_path):
     db = str(tmp_path / "test.db")
     _make_db(db)
     registry = {"projects": [{"path": db, "last_used": "2026-01-01T00:00:00+00:00"}]}
-    with patch("main.read_registry", return_value=registry):
-        result = json.loads(main.load_project())
+    with patch("main._sync_registry_with_disk", return_value={db: "today"}):
+        with patch("main.read_registry", return_value=registry):
+            result = json.loads(main.load_project())
     assert result["loaded"] is True
     assert result["project"]["name"] == "TestBoard"
     assert "server_version" in result
@@ -67,8 +144,9 @@ def test_load_project_multiple_remembered_projects_returns_list(tmp_path):
             {"path": db2, "last_used": "2026-01-02T00:00:00+00:00"},
         ]
     }
-    with patch("main.read_registry", return_value=registry):
-        result = json.loads(main.load_project())
+    with patch("main._sync_registry_with_disk", return_value={db1: "today", db2: "today"}):
+        with patch("main.read_registry", return_value=registry):
+            result = json.loads(main.load_project())
     assert result["loaded"] is False
     assert "projects" in result
     assert len(result["projects"]) == 2
@@ -79,18 +157,17 @@ def test_load_project_multiple_remembered_projects_returns_list(tmp_path):
 def test_load_project_file_missing_warns(tmp_path):
     import main
     registry = {"projects": [{"path": str(tmp_path / "missing.db"), "last_used": "2026-01-01T00:00:00+00:00"}]}
-    with patch("main.read_registry", return_value=registry):
-        result = json.loads(main.load_project())
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value=registry):
+            result = json.loads(main.load_project())
     assert result["loaded"] is False
-    assert "warning" in result
 
 
 def test_load_project_explicit_path_file_not_found(tmp_path):
     import main
-    result = json.loads(main.load_project(str(tmp_path / "missing.db")))
+    with patch("main._scan_for_db", return_value=[]):
+        result = json.loads(main.load_project(str(tmp_path / "missing.db")))
     assert result["loaded"] is False
-    assert result["error"] == "file_not_found"
-    assert "missing.db" in result["message"]
 
 
 def test_load_project_explicit_path_schema_too_new(tmp_path):
@@ -120,9 +197,69 @@ def test_load_project_registry_pruned_to_one_autoloads(tmp_path):
     db = str(tmp_path / "alive.db")
     _make_db(db)
     registry = {"projects": [{"path": db, "last_used": "2026-01-01T00:00:00+00:00"}]}
-    with patch("main.read_registry", return_value=registry):
-        result = json.loads(main.load_project())
+    with patch("main._sync_registry_with_disk", return_value={db: "today"}):
+        with patch("main.read_registry", return_value=registry):
+            result = json.loads(main.load_project())
     assert result["loaded"] is True
+
+
+def test_load_project_scan_finds_one_file(tmp_path):
+    import main
+    db = str(tmp_path / "BOARD-pcb-copilot.db")
+    _make_db(db)
+    # Sync discovers the file and adds it to registry; registry then has 1 entry with no last_used
+    with patch("main._sync_registry_with_disk", return_value={db: "today"}):
+        with patch("main.read_registry", return_value={"projects": [{"path": db}]}):
+            with patch("main.upsert_registry_entry"):
+                result = json.loads(main.load_project())
+    assert result["loaded"] is True
+    assert "discovery" in result
+    assert result["discovery"]["last_modified"] == "today"
+    assert "confirm" in result["discovery"]
+
+
+def test_load_project_scan_finds_multiple_files(tmp_path):
+    import main
+    db1 = str(tmp_path / "A-pcb-copilot.db")
+    db2 = str(tmp_path / "B-pcb-copilot.db")
+    projects = [{"path": db1}, {"path": db2}]
+    # Sync discovers both; registry has both with no last_used; picker shown
+    with patch("main._sync_registry_with_disk", return_value={db1: "today", db2: "3 days ago"}):
+        with patch("main.read_registry", return_value={"projects": projects}):
+            result = json.loads(main.load_project())
+    assert result["loaded"] is False
+    assert "projects" in result
+    assert len(result["projects"]) == 2
+
+
+def test_load_project_scan_finds_nothing_returns_copy_as_path_message(tmp_path):
+    import main
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value={"projects": []}):
+            result = json.loads(main.load_project())
+    assert result["loaded"] is False
+    assert "Copy as path" in result["message"] or "copy" in result["message"].lower()
+
+
+def test_load_project_partial_path_triggers_filename_scan(tmp_path):
+    import main
+    db = str(tmp_path / "BOARD-pcb-copilot.db")
+    _make_db(db)
+    partial = str(tmp_path / "subdir" / "BOARD-pcb-copilot.db")
+    with patch("main._scan_for_db", return_value=[(db, "today")]) as mock_scan:
+        with patch("main.upsert_registry_entry"):
+            result = json.loads(main.load_project(partial))
+    mock_scan.assert_called_once_with(filename_filter="BOARD-pcb-copilot.db")
+    assert result["loaded"] is True
+
+
+def test_load_project_partial_path_scan_finds_nothing(tmp_path):
+    import main
+    partial = str(tmp_path / "subdir" / "BOARD-pcb-copilot.db")
+    with patch("main._scan_for_db", return_value=[]):
+        result = json.loads(main.load_project(partial))
+    assert result["loaded"] is False
+    assert "Copy as path" in result["message"] or "copy" in result["message"].lower()
 
 
 # ---- list_variants / set_active_variant tests ----
@@ -139,8 +276,10 @@ def _load_test_db(tmp_path):
 def test_list_variants_no_project():
     import main
     main._project = None
-    result = json.loads(main.list_variants())
-    assert result["error"] == "no_project"
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value={"projects": []}):
+            result = json.loads(main.list_variants())
+    assert result["loaded"] is False
 
 
 def test_list_variants_returns_all(tmp_path):
@@ -183,13 +322,78 @@ def test_set_active_variant_success(tmp_path):
     assert result2["active"] == "Default"
 
 
+def _make_db_multi_variant(path: str) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA_DDL)
+    conn.execute(
+        "INSERT INTO project (name, root_dir, exported_at, exported_by,"
+        " schema_version, sheet_count, component_count, net_count)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        ("TestBoard", "/projects/TestBoard", "2026-04-29T14:32:00Z",
+         "altium-copilot v0.1.10", 1, 1, 0, 1),
+    )
+    conn.execute("INSERT INTO sheets (name) VALUES ('MCU')")
+    conn.execute("INSERT INTO variants (name, dnp_refdes) VALUES ('Production', '[]')")
+    conn.execute("INSERT INTO variants (name, dnp_refdes) VALUES ('Proto', '[\"R1\"]')")
+    conn.execute("INSERT INTO nets (name, pin_count) VALUES ('VCC', 1)")
+    conn.commit()
+    conn.close()
+
+
+def test_list_variants_single_auto_selects(tmp_path):
+    import main
+    _load_test_db(tmp_path)
+    result = json.loads(main.list_variants())
+    active = [v for v in result["variants"] if v["active"]]
+    assert len(active) == 1
+    assert active[0]["name"] == "Default"
+    assert result["auto_selected"] == "Default"
+    assert "announce" in result
+
+
+def test_list_variants_multi_no_last_variant_returns_none_active(tmp_path):
+    import main
+    db = str(tmp_path / "test.db")
+    _make_db_multi_variant(db)
+    main._load(db)
+    with patch("main.get_last_variant", return_value=None):
+        result = json.loads(main.list_variants())
+    assert not any(v["active"] for v in result["variants"])
+    assert "auto_selected" not in result
+
+
+def test_list_variants_multi_uses_last_variant(tmp_path):
+    import main
+    db = str(tmp_path / "test.db")
+    _make_db_multi_variant(db)
+    main._load(db)
+    with patch("main.get_last_variant", return_value="Proto"):
+        result = json.loads(main.list_variants())
+    active = [v for v in result["variants"] if v["active"]]
+    assert len(active) == 1
+    assert active[0]["name"] == "Proto"
+    assert result["auto_selected"] == "Proto"
+
+
+def test_set_active_variant_persists_last_variant(tmp_path):
+    import main
+    db = str(tmp_path / "BOARD-pcb-copilot.db")
+    _make_db(db)
+    main._load(db)
+    with patch("main.upsert_registry_entry") as mock_upsert:
+        main.set_active_variant("Default")
+    mock_upsert.assert_called_once_with(db, last_variant="Default")
+
+
 # ---- list_sheets / get_sheet_context tests ----
 
 def test_list_sheets_no_project():
     import main
     main._project = None
-    result = json.loads(main.list_sheets())
-    assert result["error"] == "no_project"
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value={"projects": []}):
+            result = json.loads(main.list_sheets())
+    assert result["loaded"] is False
 
 
 def test_list_sheets_returns_names(tmp_path):
@@ -213,8 +417,10 @@ def test_get_sheet_context_unknown_sheet(tmp_path):
 def test_get_sheet_context_no_project():
     import main
     main._project = None
-    result = json.loads(main.get_sheet_context("MCU"))
-    assert result["error"] == "no_project"
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value={"projects": []}):
+            result = json.loads(main.get_sheet_context("MCU"))
+    assert result["loaded"] is False
 
 
 def test_get_sheet_context_returns_components(tmp_path):
@@ -474,15 +680,83 @@ def test_get_net_high_fanout_returns_summary_only(tmp_path):
 def test_get_component_no_project():
     import main
     main._project = None
-    result = json.loads(main.get_component("U1"))
-    assert result["error"] == "no_project"
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value={"projects": []}):
+            result = json.loads(main.get_component("U1"))
+    assert result["loaded"] is False
 
 
 def test_get_net_no_project():
     import main
     main._project = None
-    result = json.loads(main.get_net("VCC"))
-    assert result["error"] == "no_project"
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value={"projects": []}):
+            result = json.loads(main.get_net("VCC"))
+    assert result["loaded"] is False
+
+
+# ---- _ensure_project_loaded tests ----
+
+def test_ensure_returns_none_when_project_loaded(tmp_path):
+    import main
+    db = str(tmp_path / "test.db")
+    _make_db(db)
+    main._load(db)
+    assert main._ensure_project_loaded() is None
+
+
+def test_ensure_loads_single_registry_match(tmp_path):
+    import main
+    db = str(tmp_path / "BOARD-pcb-copilot.db")
+    _make_db(db)
+    with patch("main._sync_registry_with_disk", return_value={db: "today"}):
+        with patch("main.read_registry", return_value={"projects": [{"path": db}]}):
+            result = main._ensure_project_loaded()
+    assert result is None
+    assert main._project is not None
+
+
+def test_ensure_returns_picker_for_multiple_registry_entries(tmp_path):
+    import main
+    db1 = str(tmp_path / "A-pcb-copilot.db")
+    db2 = str(tmp_path / "B-pcb-copilot.db")
+    projects = [{"path": db1}, {"path": db2}]
+    with patch("main._sync_registry_with_disk", return_value={db1: "today", db2: "3 days ago"}):
+        with patch("main.read_registry", return_value={"projects": projects}):
+            result = json.loads(main._ensure_project_loaded())
+    assert result["error"] == "project_required"
+    assert len(result["projects"]) == 2
+
+
+def test_ensure_returns_copy_as_path_when_nothing_found():
+    import main
+    with patch("main._sync_registry_with_disk", return_value={}):
+        with patch("main.read_registry", return_value={"projects": []}):
+            result = json.loads(main._ensure_project_loaded())
+    assert result["loaded"] is False
+    assert "Copy as path" in result["message"] or "copy" in result["message"].lower()
+
+
+def test_get_net_self_heals_when_no_project(tmp_path):
+    import main
+    db = str(tmp_path / "BOARD-pcb-copilot.db")
+    _make_db(db)
+    with patch("main._sync_registry_with_disk", return_value={db: "today"}):
+        with patch("main.read_registry", return_value={"projects": [{"path": db}]}):
+            result = json.loads(main.get_net("VCC"))
+    assert result.get("error") != "no_project"
+    assert main._project is not None
+
+
+def test_get_component_returns_picker_when_multiple_projects(tmp_path):
+    import main
+    db1 = str(tmp_path / "A-pcb-copilot.db")
+    db2 = str(tmp_path / "B-pcb-copilot.db")
+    projects = [{"path": db1}, {"path": db2}]
+    with patch("main._sync_registry_with_disk", return_value={db1: "today", db2: "3 days ago"}):
+        with patch("main.read_registry", return_value={"projects": projects}):
+            result = json.loads(main.get_component("U1"))
+    assert result["error"] == "project_required"
 
 
 # ---- _check_for_update tests ----

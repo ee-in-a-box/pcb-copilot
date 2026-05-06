@@ -47,3 +47,4 @@ def _reset_main_state():
         main._variants = []
         main._active_variant = None
         main._netlist = {}
+        main._db_path = None

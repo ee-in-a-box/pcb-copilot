@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [0.1.4] - 2026-05-06
+
+### Added
+- Registry-as-source-of-truth: `load_project` syncs the registry with disk on every call, auto-discovers `.db` files in Downloads/Desktop/Documents when the registry is empty, and prunes missing paths
+- Last-variant persistence: `set_active_variant` writes `last_variant` to the registry; `list_variants` restores it automatically on next load
+- `_ensure_project_loaded` helper: `get_component`, `get_net`, and `get_sheet_context` self-heal by auto-loading a project when none is active — no manual `load_project` call needed
+
+### Fixed
+- Claude Code MCP registration in `install.ps1` / `install.sh` now resolves `claude` via PATH and known fallback locations, making re-installs idempotent
+- Registry writes now only fire for paths matching `*-pcb-copilot.db` to prevent test pollution
+- `SERVER_INSTRUCTIONS` and tool docstrings updated for clearer Claude engagement
+
 ## [0.1.3] - 2026-05-03
 
 ### Fixed

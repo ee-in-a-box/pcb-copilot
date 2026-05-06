@@ -108,7 +108,9 @@ fi
 # Register with Claude Code
 if command -v claude &>/dev/null; then
     ok "Registering with Claude Code..."
-    claude mcp add --scope user pcb-copilot -- pcb-copilot
+    # Remove first so re-runs idempotently update the absolute path.
+    claude mcp remove --scope user pcb-copilot 2>/dev/null || true
+    claude mcp add    --scope user pcb-copilot -- "${BINARY_DEST}"
     ok "Done. pcb-copilot is ready in Claude Code."
 else
     warn "Claude Code not found — skipping MCP registration."

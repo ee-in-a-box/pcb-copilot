@@ -4,16 +4,17 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 try:
     from db import hydrate
-    from services.registry import read_registry, upsert_registry_entry
+    from services.registry import read_registry, upsert_registry_entry, get_last_variant, register_discovered
     from services.page_netlist import build_sheet_context, _HIGH_FANOUT_THRESHOLD
 except ImportError:
     from server.db import hydrate
-    from server.services.registry import read_registry, upsert_registry_entry
+    from server.services.registry import read_registry, upsert_registry_entry, get_last_variant, register_discovered
     from server.services.page_netlist import build_sheet_context, _HIGH_FANOUT_THRESHOLD
 
 import httpx
@@ -29,6 +30,69 @@ class SchemaTooNewError(ValueError):
 
 class SchemaTooOldError(ValueError):
     """Raised when the DB schema_version is below MIN_SUPPORTED_SCHEMA_VERSION."""
+
+
+def _format_age(path: Path) -> str:
+    days = (datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)).days
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return f"{days} days ago"
+
+
+def _format_age_safe(path_str: str) -> str:
+    try:
+        return _format_age(Path(path_str))
+    except Exception:
+        return "unknown"
+
+
+def _sync_registry_with_disk(search_dirs: list[Path] | None = None) -> dict[str, str]:
+    """Scan disk, register all found *-pcb-copilot.db files, return {path: last_modified}."""
+    found = _scan_for_db(search_dirs=search_dirs)
+    for path_str, _ in found:
+        register_discovered(path_str)
+    return {path_str: age for path_str, age in found}
+
+
+def _scan_for_db(
+    filename_filter: str = "*-pcb-copilot.db",
+    timeout: float = 5.0,
+    search_dirs: list[Path] | None = None,
+) -> list[tuple[str, str]]:
+    """Scan standard dirs for .db files matching filename_filter.
+
+    Returns [(resolved_path_str, last_modified_str)] sorted newest-first.
+    search_dirs is injectable for testing; defaults to Downloads/Desktop/Documents.
+    Uses os.walk with depth cap of 6 and a wall-clock timeout.
+    """
+    if search_dirs is None:
+        search_dirs = [
+            Path.home() / "Downloads",
+            Path.home() / "Desktop",
+            Path.home() / "Documents",
+        ]
+    found: list[Path] = []
+    deadline = time.monotonic() + timeout
+    for base in search_dirs:
+        if not base.exists():
+            continue
+        try:
+            for root, dirs, files in os.walk(str(base)):
+                if time.monotonic() > deadline:
+                    dirs.clear()
+                    break
+                depth = len(Path(root).relative_to(base).parts)
+                if depth >= 6:
+                    dirs.clear()
+                for f in files:
+                    if Path(f).match(filename_filter):
+                        found.append(Path(root) / f)
+        except PermissionError:
+            continue
+    found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return [(str(p), _format_age(p)) for p in found]
 
 
 def _manifest_path() -> Path:
@@ -88,24 +152,23 @@ exported from Altium Designer.
 
 ## Session Start
 
-IMPORTANT: Before responding to the user's first message — regardless of what
-they ask — you MUST run all three steps below in order. Do not skip, defer, or
-respond to the user until all three are complete.
+If you haven't called load_project() yet this session and the user asks anything
+schematic-related (GPIO, net, component, connector, board, schematic, pin, refdes,
+signal, power rail, DNP, variant), call load_project() first — it will auto-discover
+the file.
 
-1. load_project — no arguments needed at session start. Auto-loads if one project
-   is remembered; returns a list to choose from if multiple are remembered; returns
-   loaded=false if none — in which case ask the user for the .db file path and call
-   load_project(db_path=<path>). Never use shell commands or file system tools to
-   search for the .db file — only load_project with a path the user provides.
-2. list_variants — always ask the user which variant to work in, then call
-   set_active_variant. Never auto-select even if only one variant exists.
-3. list_sheets — read all sheet names, then synthesize a summary for the user:
-   project name, sheet count, variant count, snapshot age, and your read of
-   what the board does based on component descriptions and sheet names.
+If the user pastes a path ending in .db, immediately call load_project(db_path=<that path>).
+
+After load_project succeeds, call list_variants(). If list_variants returns no variant
+marked active, ask the user which variant to work in before proceeding.
+
+If load_project returns a `projects` list instead of loading, ask the user which
+project they want ("I found X and Y — which one?"), then call
+load_project(db_path=<chosen path>).
 
 ## Switching Projects
 
-Call load_project(db_path=<new path>), then repeat the session-start steps.
+Call load_project(db_path=<new path>), then call list_variants().
 
 ## General Rules
 
@@ -113,9 +176,8 @@ Call load_project(db_path=<new path>), then repeat the session-start steps.
   use the tools.
 - Only state conclusions supported by tool results. If uncertain, call more
   tools, search a datasheet, do a websearch or tell the user you are not sure.
-- Always work in the context of the active variant. Components with dnp=true
-  are not populated. If the user's question implies a different variant, ask
-  before switching.
+- Always work in the context of the active variant. Components with dnp=true are not
+  populated. If the user's question implies a different variant, ask before switching.
 - Nets with 25 or more connections are likely power or ground rails — treat
   them as rails, not signals.
 
@@ -170,10 +232,11 @@ _sheets: list[dict] = []
 _variants: list[dict] = []
 _active_variant: dict | None = None
 _netlist: dict = {}
+_db_path: str | None = None
 
 
 def _load(db_path: str) -> None:
-    global _project, _sheets, _variants, _active_variant, _netlist
+    global _project, _sheets, _variants, _active_variant, _netlist, _db_path
     # Hydrate into locals first — only commit to globals after all validation
     # passes, so a failed load never leaves the previous project partially replaced.
     project_meta, sheets, variants, netlist = hydrate(db_path)
@@ -203,16 +266,24 @@ def _load(db_path: str) -> None:
     _variants = variants
     _active_variant = None
     _netlist = netlist
+    _db_path = db_path
 
 
 # ---------- load_project ----------
 
+_COPY_AS_PATH_MESSAGE = (
+    "No .db file found automatically. To load one:\n"
+    "Windows: right-click the file in Explorer → 'Copy as path' → paste it here.\n"
+    "Mac: right-click in Finder → hold Option → 'Copy as Pathname' → paste it here."
+)
+
+
 @mcp.tool(title="Load Project", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def load_project(db_path: str | None = None) -> str:
-    """Load a pcb-copilot .db snapshot. With no argument, auto-loads the single
-    remembered project from the registry, or returns a list to choose from when
-    multiple are remembered. Pass db_path to load a specific file or to switch
-    projects. Always call at session start."""
+    """Call this at the start of any session, or whenever the user asks about a PCB,
+    schematic, net, GPIO, component, or connector. Auto-discovers the .db file in
+    standard locations — no path needed in most cases. Pass db_path only if
+    auto-discovery fails or to switch projects."""
 
     def _update_notice(result: dict) -> dict:
         state = _read_state()
@@ -232,68 +303,62 @@ def load_project(db_path: str | None = None) -> str:
                 )
         return result
 
-    current = _read_version()
-
-    # --- Explicit path provided ---
-    if db_path is not None:
-        if not Path(db_path).exists():
-            return json.dumps({
-                "loaded": False,
-                "error": "file_not_found",
-                "message": f"File not found: {db_path}. Check the path and try again.",
-            })
+    def _load_and_respond(path: str, discovered: bool = False, age: str | None = None) -> str:
         try:
-            _load(db_path)
+            _load(path)
         except SchemaTooNewError as e:
             return json.dumps({"loaded": False, "error": "schema_too_new", "message": str(e)})
         except SchemaTooOldError as e:
             return json.dumps({"loaded": False, "error": "schema_too_old", "message": str(e)})
         except Exception as e:
             return json.dumps({"loaded": False, "error": "load_failed", "message": str(e)})
-        upsert_registry_entry(db_path)
-        return json.dumps(_update_notice({
-            "loaded": True,
-            "project": _project,
-            "server_version": current,
-        }), indent=2)
+        if path.endswith("-pcb-copilot.db"):
+            upsert_registry_entry(path)
+        result: dict = {"loaded": True, "project": _project, "server_version": _read_version()}
+        if discovered:
+            result["discovery"] = {
+                "path": path,
+                "last_modified": age or "unknown",
+                "confirm": "Tell the user what file was found and its age, and ask if this is the right file.",
+            }
+        return json.dumps(_update_notice(result), indent=2)
 
-    # --- No path: check registry ---
+    # --- Explicit path provided ---
+    if db_path is not None:
+        if Path(db_path).exists():
+            return _load_and_respond(db_path)
+        # Path doesn't exist — try scanning for the filename
+        filename = Path(db_path).name
+        found = _scan_for_db(filename_filter=filename)
+        if len(found) == 1:
+            return _load_and_respond(found[0][0], discovered=True, age=found[0][1])
+        if len(found) > 1:
+            return json.dumps({
+                "loaded": False,
+                "files": [{"path": p, "last_modified": age} for p, age in found],
+                "hint": "Multiple matches found. Call load_project(db_path=<path>) with the correct one.",
+            }, indent=2)
+        return json.dumps({"loaded": False, "message": _COPY_AS_PATH_MESSAGE})
+
+    # --- No path: sync disk → registry is source of truth ---
+    current = _read_version()
+    scan_ages = _sync_registry_with_disk()
     registry = read_registry()
     projects = registry.get("projects", [])
 
-    if not projects:
-        return json.dumps({"loaded": False, "server_version": current})
+    for entry in projects:
+        entry["last_modified"] = scan_ages.get(entry["path"]) or _format_age_safe(entry["path"])
+        entry.setdefault("last_used", None)
+
+    if len(projects) == 0:
+        return json.dumps({"loaded": False, "server_version": current, "message": _COPY_AS_PATH_MESSAGE})
 
     if len(projects) == 1:
-        db_path = projects[0]["path"]
-        if not Path(db_path).exists():
-            return json.dumps({
-                "loaded": False,
-                "server_version": current,
-                "warning": (
-                    f"Previously used DB not found: {db_path}. "
-                    "Ask the user to provide the .db file path."
-                ),
-            })
-        try:
-            _load(db_path)
-        except SchemaTooNewError as e:
-            return json.dumps({"loaded": False, "error": "schema_too_new", "message": str(e),
-                               "server_version": current})
-        except SchemaTooOldError as e:
-            return json.dumps({"loaded": False, "error": "schema_too_old", "message": str(e),
-                               "server_version": current})
-        except Exception as e:
-            return json.dumps({"loaded": False, "error": "load_failed", "message": str(e),
-                               "server_version": current})
-        return json.dumps(_update_notice({
-            "loaded": True,
-            "project": _project,
-            "server_version": current,
-        }), indent=2)
+        entry = projects[0]
+        discovered = entry["last_used"] is None
+        return _load_and_respond(entry["path"], discovered=discovered, age=entry["last_modified"])
 
-    # --- Multiple projects: return sorted list for user to pick ---
-    sorted_projects = sorted(projects, key=lambda p: p.get("last_used", ""), reverse=True)
+    sorted_projects = sorted(projects, key=lambda p: p.get("last_used") or "", reverse=True)
     return json.dumps({
         "loaded": False,
         "server_version": current,
@@ -305,23 +370,45 @@ def load_project(db_path: str | None = None) -> str:
 
 @mcp.tool(title="List Variants", annotations=ToolAnnotations(readOnlyHint=True))
 def list_variants() -> str:
-    """List all variants in the project with their DNP component lists. Shows which variant
-    is currently active. Always call this after loading a project so the user can choose."""
-    if _project is None:
-        return json.dumps({"error": "no_project",
-                           "message": "No project loaded. Provide a .db file path."})
+    """List all build variants and auto-select the active one. Auto-selects the
+    last-used variant from the registry, or the only variant when there is one.
+    When multiple variants exist with no prior selection, returns the list with no
+    active variant — Claude must ask the user to choose."""
+    if early_exit := _ensure_project_loaded():
+        return early_exit
+
+    global _active_variant
+
+    # Attempt server-side auto-selection
+    if _active_variant is None:
+        candidate = None
+        if _db_path:
+            last = get_last_variant(_db_path)
+            if last:
+                candidate = next((v for v in _variants if v["name"] == last), None)
+        if candidate is None and len(_variants) == 1:
+            candidate = _variants[0]
+        if candidate is not None:
+            _active_variant = candidate
+
     active_name = _active_variant["name"] if _active_variant else None
-    return json.dumps({
-        "variants": [
-            {
-                "name": v["name"],
-                "dnp_count": len(v["dnp_refdes"]),
-                "dnp_refdes": v["dnp_refdes"],
-                "active": v["name"] == active_name,
-            }
-            for v in _variants
-        ]
-    }, indent=2)
+
+    variants_out = [
+        {
+            "name": v["name"],
+            "dnp_count": len(v["dnp_refdes"]),
+            "dnp_refdes": v["dnp_refdes"],
+            "active": v["name"] == active_name,
+        }
+        for v in _variants
+    ]
+
+    result: dict = {"variants": variants_out}
+    if active_name:
+        result["auto_selected"] = active_name
+        result["announce"] = "Tell the user which variant is active and list the others. Do not ask for confirmation."
+
+    return json.dumps(result, indent=2)
 
 
 # ---------- set_active_variant ----------
@@ -343,6 +430,8 @@ def set_active_variant(name: str) -> str:
             "available": available,
         })
     _active_variant = match
+    if _db_path and _db_path.endswith("-pcb-copilot.db"):
+        upsert_registry_entry(_db_path, last_variant=match["name"])
     return json.dumps({
         "active": match["name"],
         "dnp_count": len(match["dnp_refdes"]),
@@ -360,6 +449,35 @@ class _VariantAdapter:
         return refdes in self._dnp
 
 
+def _ensure_project_loaded() -> str | None:
+    """Returns None if a project is ready. Returns a JSON error string if blocked.
+
+    Callers use: if early_exit := _ensure_project_loaded(): return early_exit
+    """
+    if _project is not None:
+        return None
+    scan_ages = _sync_registry_with_disk()
+    registry = read_registry()
+    projects = registry.get("projects", [])
+    for entry in projects:
+        entry["last_modified"] = scan_ages.get(entry["path"]) or _format_age_safe(entry["path"])
+        entry.setdefault("last_used", None)
+    if len(projects) == 1:
+        try:
+            _load(projects[0]["path"])
+            return None
+        except Exception:
+            pass
+    if len(projects) > 1:
+        sorted_projects = sorted(projects, key=lambda p: p.get("last_used") or "", reverse=True)
+        return json.dumps({
+            "error": "project_required",
+            "projects": sorted_projects,
+            "hint": "Ask the user which project they want, then call load_project(db_path=<path>).",
+        })
+    return json.dumps({"loaded": False, "message": _COPY_AS_PATH_MESSAGE})
+
+
 # ---------- list_sheets ----------
 
 @mcp.tool(title="List Sheets", annotations=ToolAnnotations(readOnlyHint=True))
@@ -367,9 +485,8 @@ def list_sheets() -> str:
     """Return all sheet names in the project. Call this when the user asks about a sheet
     by name you don't recognize, or to know what sheets exist before calling
     get_sheet_context."""
-    if _project is None:
-        return json.dumps({"error": "no_project",
-                           "message": "No project loaded. Provide a .db file path."})
+    if early_exit := _ensure_project_loaded():
+        return early_exit
     return json.dumps({"sheets": [s["name"] for s in _sheets]})
 
 
@@ -379,10 +496,12 @@ def list_sheets() -> str:
 def get_sheet_context(sheet_name: str) -> str:
     """Get all components on a schematic sheet with their pin-to-net connections and
     cross-sheet neighbors. The primary tool for any question about what is on a sheet,
-    how a circuit works, or how signals flow. Call this first for most questions."""
-    if _project is None:
-        return json.dumps({"error": "no_project",
-                           "message": "No project loaded. Provide a .db file path."})
+    how a circuit works, or how signals flow. Use for questions about signal flow,
+    circuit function, or what's connected on a specific sheet — covers GPIO mappings,
+    bus topology, power distribution, and cross-sheet tracing. Call this first for
+    most questions."""
+    if early_exit := _ensure_project_loaded():
+        return early_exit
     sheet_names = [s["name"] for s in _sheets]
     canonical = next((s for s in sheet_names if s.lower() == sheet_name.lower()), None)
     if canonical is None:
@@ -408,11 +527,12 @@ def get_sheet_context(sheet_name: str) -> str:
 @mcp.tool(title="Get Component", annotations=ToolAnnotations(readOnlyHint=True))
 def get_component(query: str) -> str:
     """Get full detail for a component: MPN, value, description, sheet, all pins with
-    names and nets, and DNP status for the active variant. Tries exact refdes match
-    first, then case-insensitive search across refdes, MPN, and description."""
-    if _project is None:
-        return json.dumps({"error": "no_project",
-                           "message": "No project loaded. Provide a .db file path."})
+    names and nets, and DNP status for the active variant. Use for targeted lookups of
+    a specific IC, resistor, connector, or any component by refdes (U1, R4, J3), MPN,
+    or description keyword. Tries exact refdes match first, then case-insensitive search
+    across refdes, MPN, and description."""
+    if early_exit := _ensure_project_loaded():
+        return early_exit
     components = _netlist.get("components", {})
 
     # Exact refdes match (case-insensitive)
@@ -484,13 +604,13 @@ def get_component(query: str) -> str:
 
 @mcp.tool(title="Get Net", annotations=ToolAnnotations(readOnlyHint=True))
 def get_net(query: str) -> str:
-    """Look up a net by name. Tries exact match first, then case-insensitive search.
-    For normal nets: returns all pins with component context. For high-fanout nets
-    (power/ground rails): returns a summary with directive to filter by component or
-    sheet. For fuzzy matches: returns list of matching net names to narrow down."""
-    if _project is None:
-        return json.dumps({"error": "no_project",
-                           "message": "No project loaded. Provide a .db file path."})
+    """Look up a net by name. Use when asked about a specific signal, bus, or rail —
+    e.g. UART_TX, SPI_CS, VDD, GND. Tries exact match first, then case-insensitive
+    search. For normal nets: returns all pins with component context. For high-fanout
+    nets (power/ground rails): returns a summary with directive to filter by component
+    or sheet. For fuzzy matches: returns list of matching net names to narrow down."""
+    if early_exit := _ensure_project_loaded():
+        return early_exit
     nets = _netlist.get("nets", {})
 
     # Exact match (case-insensitive)

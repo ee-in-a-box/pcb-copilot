@@ -35,15 +35,39 @@ def write_registry(registry: dict) -> None:
         logger.error(f"pcb-copilot: failed to write registry: {e}")
 
 
-def upsert_registry_entry(path: str) -> None:
+def upsert_registry_entry(path: str, last_variant: str | None = None) -> None:
     registry = read_registry()
     now = datetime.now(timezone.utc).isoformat()
     projects = registry.get("projects", [])
     for entry in projects:
         if entry["path"] == path:
             entry["last_used"] = now
+            if last_variant is not None:
+                entry["last_variant"] = last_variant
             break
     else:
-        projects.append({"path": path, "last_used": now})
+        entry = {"path": path, "last_used": now}
+        if last_variant is not None:
+            entry["last_variant"] = last_variant
+        projects.append(entry)
     registry["projects"] = projects
     write_registry(registry)
+
+
+def register_discovered(path: str) -> None:
+    """Add path to registry with no last_used. No-op if already present."""
+    registry = read_registry()
+    projects = registry.get("projects", [])
+    if any(e["path"] == path for e in projects):
+        return
+    projects.append({"path": path})
+    registry["projects"] = projects
+    write_registry(registry)
+
+
+def get_last_variant(path: str) -> str | None:
+    registry = read_registry()
+    for entry in registry.get("projects", []):
+        if entry["path"] == path:
+            return entry.get("last_variant")
+    return None

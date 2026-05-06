@@ -17,15 +17,15 @@
   "tools": [
     {
       "name": "load_project",
-      "description": "Load a pcb-copilot .db snapshot. With no argument, auto-loads the single remembered project, or returns a list to choose from when multiple are remembered. Pass db_path to load a specific file or switch projects. Always call at session start."
+      "description": "Call this at the start of any session, or whenever the user asks about a PCB, schematic, net, GPIO, component, or connector. Auto-discovers the .db file in standard locations — no path needed in most cases. Pass db_path only if auto-discovery fails or to switch projects."
     },
     {
       "name": "list_variants",
-      "description": "List all build variants and their DNP (Do Not Populate) component lists. Shows which variant is currently active. Always call after loading a project so the user can choose which variant to work in."
+      "description": "List all build variants and auto-select the active one. Auto-selects the last-used variant from the registry, or the only variant when there is one. When multiple variants exist with no prior selection, returns the list with no active variant — Claude must ask the user to choose."
     },
     {
       "name": "set_active_variant",
-      "description": "Set the active build variant by name. All subsequent tool calls filter components by this variant's DNP list — unpopulated components are marked dnp=true. Always call after the user selects a variant."
+      "description": "Set the active build variant by name. All subsequent tool calls filter components by this variant's DNP list — unpopulated components are marked dnp=true. Persists the selection so it is auto-selected next session."
     },
     {
       "name": "list_sheets",
@@ -33,15 +33,15 @@
     },
     {
       "name": "get_sheet_context",
-      "description": "Get all components on a schematic sheet with their pin-to-net connections and one-hop cross-sheet neighbors. The primary tool for questions about what is on a sheet, how a circuit works, signal flow, or what connects to what. Call this first for most schematic questions."
+      "description": "Get all components on a schematic sheet with their pin-to-net connections and one-hop cross-sheet neighbors. Use for questions about signal flow, circuit function, or what's connected on a specific sheet — covers GPIO mappings, bus topology, power distribution, and cross-sheet tracing. Call this first for most schematic questions."
     },
     {
       "name": "get_component",
-      "description": "Look up a specific component by reference designator, MPN, or description keyword. Returns MPN, value, description, sheet, all pins with names and net connections, and DNP status for the active variant. Use for targeted component lookups after get_sheet_context."
+      "description": "Look up a specific component by reference designator (U1, R4, J3), MPN, or description keyword. Returns MPN, value, description, sheet, all pins with names and net connections, and DNP status for the active variant. Use for targeted component lookups."
     },
     {
       "name": "get_net",
-      "description": "Look up a net by name or keyword. Returns all pins on the net with component context for normal nets. For high-fanout nets (power/ground rails with >25 pins), returns a summary and prompts for a more specific query. Use for targeted signal or power rail lookups."
+      "description": "Look up a net by name or keyword — e.g. UART_TX, SPI_CS, VDD, GND. Returns all pins on the net with component context for normal nets. For high-fanout nets (power/ground rails with >25 pins), returns a summary and prompts for a more specific query."
     }
   ],
   "compatibility": {
