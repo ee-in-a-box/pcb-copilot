@@ -428,10 +428,9 @@ def test_get_sheet_context_returns_components(tmp_path):
     _make_db(str(tmp_path / "test.db"))
     main._load(str(tmp_path / "test.db"))
     main.set_active_variant("Default")
-    result = json.loads(main.get_sheet_context("MCU"))
-    assert result["sheet"] == "MCU"
-    refdes_list = [c["refdes"] for c in result["components"]]
-    assert "U1" in refdes_list
+    result = main.get_sheet_context("MCU")
+    assert "sheet:MCU" in result
+    assert "U1" in result
 
 
 def test_get_sheet_context_all_dnp_warns(tmp_path):
@@ -455,9 +454,9 @@ def test_get_sheet_context_all_dnp_warns(tmp_path):
     conn.close()
     main._load(db)
     main.set_active_variant("Lite")
-    result = json.loads(main.get_sheet_context("MCU"))
+    result = main.get_sheet_context("MCU")
     assert "warning" in result
-    assert "DNP" in result["warning"]
+    assert "DNP" in result
 
 
 # ---- get_component tests ----
@@ -628,12 +627,22 @@ def test_get_net_case_insensitive_exact(tmp_path):
     assert result["net"] == "MCU_TX"
 
 
-def test_get_net_fuzzy_returns_matches(tmp_path):
+def test_get_net_partial_unique_resolves_to_net(tmp_path):
+    """Partial name that uniquely matches one net returns full net info (via regex)."""
     import main
     main._load(_load_richer_db(tmp_path))
     result = json.loads(main.get_net("mcu"))
+    assert result["net"] == "MCU_TX"
+
+
+def test_get_net_partial_ambiguous_returns_fuzzy_matches(tmp_path):
+    """Partial name matching multiple nets returns fuzzy_matches list."""
+    import main
+    main._load(_load_richer_db(tmp_path))
+    result = json.loads(main.get_net(".*"))
     assert "fuzzy_matches" in result
     assert "MCU_TX" in result["fuzzy_matches"]
+    assert "GND" in result["fuzzy_matches"]
 
 
 def test_get_net_no_match(tmp_path):
@@ -868,3 +877,96 @@ def test_get_net_exactly_25_pins_is_high_fanout(tmp_path):
     result = json.loads(main.get_net("VCC"))
     assert result.get("high_fanout") is True, "25-pin net must be high-fanout"
     assert "pins" not in result
+
+
+def _make_hf_db(tmp_path, name: str, net: str = "GND", sheet: str = "P", count: int = 26) -> str:
+    db = str(tmp_path / name)
+    conn = sqlite3.connect(db)
+    conn.executescript(_SCHEMA_DDL)
+    conn.execute(
+        "INSERT INTO project (name, root_dir, exported_at, exported_by,"
+        " schema_version, sheet_count, component_count, net_count)"
+        f" VALUES ('B', '/', '2026-04-29T00:00:00Z', 'v', 1, 1, {count}, 1)"
+    )
+    conn.execute(f"INSERT INTO sheets (name) VALUES ('{sheet}')")
+    conn.execute(f"INSERT INTO nets (name, pin_count) VALUES ('{net}', {count})")
+    for i in range(count):
+        cur = conn.execute(
+            "INSERT INTO components (refdes, mpn, description, value, sheet_id)"
+            f" VALUES ('R{i}', NULL, NULL, NULL, 1)"
+        )
+        conn.execute(
+            "INSERT INTO pins (component_id, pin_number, pin_name, net_name)"
+            f" VALUES (?, '1', '1', '{net}')", (cur.lastrowid,)
+        )
+    conn.execute("INSERT INTO variants (name, dnp_refdes) VALUES ('Default', '[]')")
+    conn.commit()
+    conn.close()
+    return db
+
+
+# ---- get_net: regex search ----
+
+def test_get_net_regex_single_match(tmp_path):
+    import main
+    main._load(_load_richer_db(tmp_path))
+    result = json.loads(main.get_net("MCU_T.*"))
+    assert result["net"] == "MCU_TX"
+
+
+def test_get_net_regex_multiple_matches(tmp_path):
+    import main
+    main._load(_load_richer_db(tmp_path))
+    result = json.loads(main.get_net("MCU_TX|GND"))
+    assert "fuzzy_matches" in result
+    assert "MCU_TX" in result["fuzzy_matches"]
+    assert "GND" in result["fuzzy_matches"]
+
+
+def test_get_net_metacharacter_net_name_falls_back_to_exact(tmp_path):
+    """+5V is invalid regex — must fall through to exact match and find the net."""
+    db = str(tmp_path / "meta.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(_SCHEMA_DDL)
+    conn.execute(
+        "INSERT INTO project (name, root_dir, exported_at, exported_by,"
+        " schema_version, sheet_count, component_count, net_count)"
+        " VALUES ('B', '/', '2026-04-29T00:00:00Z', 'v', 1, 1, 1, 1)"
+    )
+    conn.execute("INSERT INTO sheets (name) VALUES ('P')")
+    conn.execute("INSERT INTO nets (name, pin_count) VALUES ('+5V', 1)")
+    cur = conn.execute(
+        "INSERT INTO components (refdes, mpn, description, value, sheet_id)"
+        " VALUES ('U1', NULL, NULL, NULL, 1)"
+    )
+    conn.execute(
+        "INSERT INTO pins (component_id, pin_number, pin_name, net_name)"
+        " VALUES (?, '1', 'VCC', '+5V')", (cur.lastrowid,)
+    )
+    conn.execute("INSERT INTO variants (name, dnp_refdes) VALUES ('Default', '[]')")
+    conn.commit()
+    conn.close()
+    import main
+    main._load(db)
+    result = json.loads(main.get_net("+5V"))
+    assert result["net"] == "+5V"
+
+
+# ---- get_net: high-fanout sample ----
+
+def test_get_net_high_fanout_includes_pins_sample(tmp_path):
+    import main
+    main._load(_make_hf_db(tmp_path, "hf_sample.db"))
+    result = json.loads(main.get_net("GND"))
+    assert result["high_fanout"] is True
+    assert "pins_sample" in result
+    assert 1 <= len(result["pins_sample"]) <= 10
+
+
+def test_get_net_high_fanout_sample_has_sheet_context(tmp_path):
+    import main
+    main._load(_make_hf_db(tmp_path, "hf_sheet.db", sheet="Power"))
+    result = json.loads(main.get_net("GND"))
+    sample_pin = result["pins_sample"][0]
+    assert "sheet" in sample_pin
+    assert sample_pin["sheet"] == "Power"

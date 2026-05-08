@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -11,11 +12,11 @@ from pathlib import Path
 try:
     from db import hydrate
     from services.registry import read_registry, upsert_registry_entry, get_last_variant, register_discovered
-    from services.page_netlist import build_sheet_context, _HIGH_FANOUT_THRESHOLD
+    from services.page_netlist import build_sheet_context, MAX_RESULT_SIZE_CHARS, _HIGH_FANOUT_THRESHOLD
 except ImportError:
     from server.db import hydrate
     from server.services.registry import read_registry, upsert_registry_entry, get_last_variant, register_discovered
-    from server.services.page_netlist import build_sheet_context, _HIGH_FANOUT_THRESHOLD
+    from server.services.page_netlist import build_sheet_context, MAX_RESULT_SIZE_CHARS, _HIGH_FANOUT_THRESHOLD
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -186,6 +187,10 @@ Call load_project(db_path=<new path>), then call list_variants().
 - Start with get_sheet_context for any question about a sheet, circuit, or
   signal flow. One call returns all components with pin-to-net data and
   one-hop cross-sheet neighbors — usually sufficient to answer the question.
+- Results are paginated. If the response contains has_more:true, call
+  get_sheet_context again with the offset from the next: line and the same
+  sheet_name, and repeat until has_more:false. Accumulate all pages before
+  answering the user.
 - For cross-sheet tracing, follow connected_to by calling
   get_sheet_context(sheet_name=...) for the next sheet. Do not call
   get_component one-by-one for cross-sheet components.
@@ -220,7 +225,7 @@ Do this before continuing with any other response.
 ## Error Recovery
 
 - Component not found → use get_component with a partial name or description
-- Net not found → use get_net with a keyword (e.g. get_net("UART"), get_net("CAN"))
+- Net not found → use get_net with a keyword or regex (e.g. get_net("UART"), get_net("UART.*"), get_net("3V3|5V0"))
 - Sheet not found → call list_sheets and present options to the user
 """
 
@@ -492,14 +497,19 @@ def list_sheets() -> str:
 
 # ---------- get_sheet_context ----------
 
-@mcp.tool(title="Get Sheet Context", annotations=ToolAnnotations(readOnlyHint=True))
-def get_sheet_context(sheet_name: str) -> str:
+@mcp.tool(title="Get Sheet Context", annotations=ToolAnnotations(readOnlyHint=True),
+          meta={"anthropic/maxResultSizeChars": MAX_RESULT_SIZE_CHARS})
+def get_sheet_context(sheet_name: str, offset: int = 0) -> str:
     """Get all components on a schematic sheet with their pin-to-net connections and
     cross-sheet neighbors. The primary tool for any question about what is on a sheet,
     how a circuit works, or how signals flow. Use for questions about signal flow,
     circuit function, or what's connected on a specific sheet — covers GPIO mappings,
     bus topology, power distribution, and cross-sheet tracing. Call this first for
-    most questions."""
+    most questions.
+
+    Results are paginated by character budget. If the response contains has_more:true,
+    call this tool again with the offset from the next: line and the same sheet_name,
+    and repeat until has_more:false. Accumulate all pages before answering the user."""
     if early_exit := _ensure_project_loaded():
         return early_exit
     sheet_names = [s["name"] for s in _sheets]
@@ -511,15 +521,7 @@ def get_sheet_context(sheet_name: str) -> str:
             "available_sheets": sheet_names,
         })
     adapter = _VariantAdapter(_active_variant)
-    result = json.loads(build_sheet_context(_netlist, canonical, adapter))
-    comps = result.get("components", [])
-    if comps and all(c["dnp"] for c in comps):
-        result["warning"] = (
-            f"All {len(comps)} components on sheet '{canonical}' are DNP "
-            f"in the '{_active_variant['name']}' variant. "
-            "Switch variants with set_active_variant to see populated components."
-        )
-    return json.dumps(result, indent=2)
+    return build_sheet_context(_netlist, canonical, adapter, offset)
 
 
 # ---------- get_component ----------
@@ -604,11 +606,13 @@ def get_component(query: str) -> str:
 
 @mcp.tool(title="Get Net", annotations=ToolAnnotations(readOnlyHint=True))
 def get_net(query: str) -> str:
-    """Look up a net by name. Use when asked about a specific signal, bus, or rail —
-    e.g. UART_TX, SPI_CS, VDD, GND. Tries exact match first, then case-insensitive
-    search. For normal nets: returns all pins with component context. For high-fanout
-    nets (power/ground rails): returns a summary with directive to filter by component
-    or sheet. For fuzzy matches: returns list of matching net names to narrow down."""
+    """Look up a net by name or pattern. Use when asked about a specific signal, bus, or
+    rail — e.g. UART_TX, SPI_CS, VDD, GND. Supports regex (e.g. UART.*, .*_TX, 3V3|5V0).
+    Tries exact match first, then regex, then substring fuzzy. For normal nets: returns
+    all pins with refdes, pin number, pin name, and sheet. For high-fanout nets (power/
+    ground rails with >=25 pins): returns a summary with a pins_sample (up to 10 pins)
+    and a directive to filter by component or sheet. For multiple matches: returns
+    fuzzy_matches list."""
     if early_exit := _ensure_project_loaded():
         return early_exit
     nets = _netlist.get("nets", {})
@@ -616,13 +620,37 @@ def get_net(query: str) -> str:
     # Exact match (case-insensitive)
     net_key = next((k for k in nets if k.lower() == query.lower()), None)
 
+    # Regex match (if no exact match)
+    if net_key is None:
+        try:
+            pattern = re.compile(query, re.IGNORECASE)
+            regex_matches = [name for name in nets if pattern.search(name)]
+            if len(regex_matches) == 1:
+                net_key = regex_matches[0]
+            elif len(regex_matches) > 1:
+                return json.dumps({"fuzzy_matches": sorted(regex_matches)}, indent=2)
+            # 0 matches → fall through to fuzzy
+        except re.error:
+            pass  # invalid regex (e.g. +5V) → fall through to fuzzy
+
     if net_key:
         connections = nets[net_key]
+        components = _netlist.get("components", {})
+
         if len(connections) >= _HIGH_FANOUT_THRESHOLD:
+            pins_sample = [
+                {
+                    "refdes": refdes,
+                    "pin": pin,
+                    "sheet": components.get(refdes, {}).get("sheet"),
+                }
+                for refdes, pin in connections[:10]
+            ]
             return json.dumps({
                 "net": net_key,
                 "pin_count": len(connections),
                 "high_fanout": True,
+                "pins_sample": pins_sample,
                 "message": (
                     f"{net_key} has {len(connections)} connections — "
                     "this is likely a power or ground plane.\n"
@@ -633,7 +661,6 @@ def get_net(query: str) -> str:
                 ),
             }, indent=2)
 
-        components = _netlist.get("components", {})
         return json.dumps({
             "net": net_key,
             "pin_count": len(connections),

@@ -1,9 +1,9 @@
-import json
+import re
 from collections import defaultdict
 
-# Nets with this many or more connections are treated as power/ground rails.
-# >= is intentional: a net with exactly 25 connections gets the summary path.
 _HIGH_FANOUT_THRESHOLD = 25
+_PAGE_CHAR_BUDGET = 150_000
+MAX_RESULT_SIZE_CHARS = 200_000
 
 
 def _build_net_index(netlist: dict) -> dict[str, list[dict]]:
@@ -18,9 +18,55 @@ def _build_net_index(netlist: dict) -> dict[str, list[dict]]:
     return index
 
 
-def build_sheet_context(netlist: dict, sheet_name: str, variant_state) -> str:
-    """Return JSON of components on the given sheet with DNP annotation, pin-to-net map,
-    and cross-sheet connected_to neighbors for each non-power net."""
+def _render_component(comp: dict, current_sheet: str) -> str:
+    """Render one component as compact text lines.
+
+    Format:
+      REFDES|MPN|DESCRIPTION|VALUE [DNP]
+        PIN_LABEL:NET→neighbor1,neighbor2,...
+        PIN_LABEL:NET[HF:fanout]
+
+    Same-sheet neighbors are shortened to refdes.pin; cross-sheet neighbors
+    keep @sheet suffix so the caller knows where to look next.
+    """
+    refdes = comp["refdes"]
+    mpn = comp.get("mpn") or ""
+    desc = comp.get("description") or ""
+    value = comp.get("value") or ""
+    dnp_flag = " [DNP]" if comp.get("dnp") else ""
+
+    lines = [f"{refdes}|{mpn}|{desc}|{value}{dnp_flag}"]
+
+    for pin_num, pin in comp.get("pins", {}).items():
+        net = pin.get("net", "")
+        name = pin.get("name", "")
+        label = f"{pin_num}({name})" if name and name != pin_num and name != "~" else pin_num
+
+        if pin.get("high_fanout"):
+            lines.append(f"  {label}:{net}[HF:{pin['fanout']}]")
+        else:
+            neighbors = []
+            for n in pin.get("connected_to", []):
+                m = re.match(r"(.+?) \((.+?)\)$", n)
+                if m:
+                    ref_part, sheet_part = m.group(1), m.group(2)
+                    if sheet_part.lower() == current_sheet.lower():
+                        neighbors.append(ref_part)
+                    else:
+                        neighbors.append(f"{ref_part}@{sheet_part}")
+                else:
+                    neighbors.append(n)
+            nbr_str = ",".join(neighbors)
+            lines.append(f"  {label}:{net}->{nbr_str}" if nbr_str else f"  {label}:{net}")
+
+    return "\n".join(lines)
+
+
+def build_sheet_context(netlist: dict, sheet_name: str, variant_state, offset: int = 0) -> str:
+    """Return text of components on the given sheet with DNP annotation, pin-to-net map,
+    and cross-sheet connected_to neighbors for each non-power net. Results are paginated
+    by character budget — pass offset to retrieve subsequent pages."""
+    offset = max(0, offset)
     components = netlist.get("components", {})
     net_index = _build_net_index(netlist)
 
@@ -59,8 +105,39 @@ def build_sheet_context(netlist: dict, sheet_name: str, variant_state) -> str:
 
     sheet_components.sort(key=lambda c: c["refdes"])
 
-    return json.dumps({
-        "sheet": sheet_name,
-        "component_count": len(sheet_components),
-        "components": sheet_components,
-    }, indent=2)
+    total = len(sheet_components)
+
+    # Fill page up to character budget; always include at least one component
+    # so offset always advances even if a single component exceeds the budget.
+    page_rendered = []
+    page_chars = 0
+    for comp in sheet_components[offset:]:
+        rendered = _render_component(comp, sheet_name)
+        if page_rendered and page_chars + len(rendered) > _PAGE_CHAR_BUDGET:
+            break
+        page_rendered.append(rendered)
+        page_chars += len(rendered)
+
+    next_offset = offset + len(page_rendered)
+    has_more = next_offset < total
+
+    all_dnp = total > 0 and all(c["dnp"] for c in sheet_components)
+
+    has_more_str = "true" if has_more else "false"
+    header = f"sheet:{sheet_name} total:{total} offset:{offset} has_more:{has_more_str}"
+
+    if all_dnp and offset == 0:
+        header += f"\nwarning:all {total} components on this sheet are DNP in the active variant"
+
+    if has_more:
+        remaining = total - next_offset
+        header += (
+            f"\nnext:get_sheet_context(sheet_name='{sheet_name}', offset={next_offset})"
+            f" [{remaining} remaining]"
+        )
+
+    if page_chars > _PAGE_CHAR_BUDGET and page_rendered:
+        first_refdes = page_rendered[0].split("|")[0]
+        header += f"\nwarning:{first_refdes} exceeds page budget — use get_component instead"
+
+    return header + "\n\n" + "\n\n".join(page_rendered)

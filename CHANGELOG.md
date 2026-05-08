@@ -3,6 +3,24 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [0.1.5] - 2026-05-07
+
+### Added
+- `get_net` now supports regex patterns (e.g. `UART.*`, `.*_TX`, `3V3|5V0`) — tries exact match first, then regex, then substring fuzzy
+- `get_net` high-fanout response now includes `pins_sample` (up to 10 pins with sheet context) instead of returning no pins at all
+- `get_sheet_context` pagination: `has_more` field now uses lowercase `true`/`false` strings for reliable parsing; `next:` hint line gives exact call to make
+- `get_sheet_context` negative `offset` values are clamped to 0
+- All-DNP warning suppressed on paginated pages after the first (was incorrectly repeated on every page)
+
+### Changed
+- `get_sheet_context` output format switched to compact text (one component per block) with character-budget pagination — significantly reduces token usage on large sheets
+
+### Fixed
+- `get_net` docstring, `manifest.json` tool description, and system prompt error-recovery hint all updated to reflect regex support and `pins_sample`
+
+### Tests
+- Added 11 new tests covering pagination edge cases (`negative offset`, `offset beyond total`, `oversized component`, `all-DNP suppression on page 2+`, `next: hint values`) and `get_net` improvements (`regex single/multi match`, `metacharacter fallback`, `pins_sample` presence and sheet context)
+
 ## [0.1.4] - 2026-05-06
 
 ### Added

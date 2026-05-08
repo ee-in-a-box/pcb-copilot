@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/ee-in-a-box/pcb-copilot/main/instal
 
 ## Usage
 
-Once installed, just open Claude and ask a question about your board — pcb-copilot will automatically find your `.db` file in your Downloads, Desktop, or Documents folder. Or you can provide the path directly if needed.
+Once installed, just open Claude desktop or Claude Code and ask a question about your board — pcb-copilot will automatically find your `.db` file in your Downloads, Desktop, or Documents folder. Or you can provide the path directly if needed.
 
 **The most reliable way to start:** mention pcb-copilot by name in your message:
 

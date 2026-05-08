@@ -33,7 +33,7 @@
     },
     {
       "name": "get_sheet_context",
-      "description": "Get all components on a schematic sheet with their pin-to-net connections and one-hop cross-sheet neighbors. Use for questions about signal flow, circuit function, or what's connected on a specific sheet — covers GPIO mappings, bus topology, power distribution, and cross-sheet tracing. Call this first for most schematic questions."
+      "description": "Get all components on a schematic sheet with their pin-to-net connections and one-hop cross-sheet neighbors. Results are paginated — if has_more:true, use the offset from the next: line to call again. Use for questions about signal flow, circuit function, or what's connected on a specific sheet — covers GPIO mappings, bus topology, power distribution, and cross-sheet tracing. Call this first for most schematic questions."
     },
     {
       "name": "get_component",
@@ -41,7 +41,7 @@
     },
     {
       "name": "get_net",
-      "description": "Look up a net by name or keyword — e.g. UART_TX, SPI_CS, VDD, GND. Returns all pins on the net with component context for normal nets. For high-fanout nets (power/ground rails with >25 pins), returns a summary and prompts for a more specific query."
+      "description": "Look up a net by name or pattern — e.g. UART_TX, SPI_CS, VDD, GND, or regex like UART.* or 3V3|5V0. Returns all pins with refdes, pin name, and sheet for normal nets. For high-fanout nets (>=25 pins), returns a summary with a pins_sample (up to 10 pins with sheet context) and prompts for a more specific query."
     }
   ],
   "compatibility": {
